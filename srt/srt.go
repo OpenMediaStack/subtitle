@@ -2,7 +2,7 @@ package srt
 
 import (
 	"bufio"
-	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -31,58 +31,105 @@ func Open(file string) ([]subtitle.Cue, error) {
 
 // parse parses SRT subtitle data from a byte slice and returns a slice of subtitle.Cue.
 func parse(data []byte) ([]subtitle.Cue, error) {
-	b := bytes.NewReader(data)
-	s := bufio.NewScanner(b)
+	r := strings.NewReader(string(data))
+	s := bufio.NewScanner(r)
 
 	var state int
+	lineNb := 1
 	var cues []subtitle.Cue
 	var cue subtitle.Cue
 
 	for s.Scan() {
 		line := strings.TrimSpace(s.Text())
+
+		if line == "" {
+			if cue.Text != "" {
+				cues = append(cues, cue)
+				cue = subtitle.Cue{}
+			}
+			state = 0
+			continue
+		}
+
 		switch state {
 		case 0:
-			if line == "" {
-				continue
+			if err := validateIndexLine(line); err != nil {
+				return nil, fmt.Errorf("%w at line %d: '%s'", err, lineNb, line)
 			}
-			index, err := strconv.Atoi(line)
-			if err != nil {
-				return nil, err
-			}
-			cue = subtitle.Cue{}
-			cue.Index = index
+			cue.Index, _ = strconv.Atoi(line)
 			state = 1
 		case 1:
-			times := strings.Split(line, "-->")
-			start, err := subtitle.NewTimecode(times[0])
-			if err != nil {
-				return nil, err
+			if err := validateTimecodeLine(line); err != nil {
+				return nil, fmt.Errorf("%w at line %d: '%s'", err, lineNb, line)
 			}
-			cue.Start = start
-
-			end, err := subtitle.NewTimecode(times[1])
+			parts := strings.Split(line, " --> ")
+			startTimecode, err := subtitle.NewTimecode(parts[0])
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("%w at line %d: '%s'", err, lineNb, line)
 			}
-			cue.End = end
+			cue.Start = startTimecode
+			endTimecode, err := subtitle.NewTimecode(parts[1])
+			if err != nil {
+				return nil, fmt.Errorf("%w at line %d: '%s'", err, lineNb, line)
+			}
+			cue.End = endTimecode
 			state = 2
-			continue
 		case 2:
-			if line == "" {
-				cues = append(cues, cue)
-				state = 0
-				continue
-			}
 			if cue.Text != "" {
 				cue.Text += "\n"
 			}
 			cue.Text += line
-
 		}
 
+		lineNb++
 	}
-	if state == 2 {
+
+	if cue.Text != "" {
 		cues = append(cues, cue)
 	}
+
+	if err := s.Err(); err != nil {
+		return nil, err
+	}
+
 	return cues, nil
+}
+
+func validateIndexLine(line string) error {
+	_, err := strconv.Atoi(line)
+	if err != nil {
+		return subtitle.ErrInvalidIndexLine
+	}
+	return nil
+}
+
+func validateTimecodeLine(line string) error {
+	parts := strings.Split(line, " --> ")
+	if len(parts) != 2 {
+		return subtitle.ErrMissingTimecodeArrow
+	}
+	for _, tc := range parts {
+		if !isValidTimecode(tc) {
+			return subtitle.ErrInvalidTimecodeFormat
+		}
+	}
+	return nil
+}
+
+func isValidTimecode(tc string) bool {
+	if len(tc) != 12 {
+		return false
+	}
+
+	parts := strings.Split(tc, ":")
+	if len(parts) != 3 {
+		return false
+	}
+
+	secondsParts := strings.Split(parts[2], ",")
+	if len(secondsParts) != 2 {
+		return false
+	}
+
+	return true
 }
